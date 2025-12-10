@@ -58,14 +58,14 @@ def extract_text_from_pdf(file: UploadFile) -> str:
 
 def generate_flashcards_from_text(text: str):
     prompt = f"""
-Zrób fiszki do nauki z poniższego tekstu.
+make flashcards from this text in texts language.
 
-Zwróć TYLKO JSON:
+return ONLY json:
 [
   {{ "question": "...", "answer": "..." }}
 ]
 
-Tekst:
+Text:
 {text}
 """
 
@@ -118,3 +118,4 @@ async def flashcards_from_pdf(file: UploadFile = File(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
