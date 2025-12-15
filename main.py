@@ -346,7 +346,7 @@ def flashcards_from_url(data: URLFlashcardRequest):
         # 1️⃣ Pobranie i wyczyszczenie tekstu
         text = fetch_clean_text(data.url)
         if not text:
-            raise HTTPException(status_code=400, detail="Nie udało się pobrać treści z URL")
+            raise HTTPException(status_code=400, detail="Cannot download data from URL")
 
         # 2️⃣ TF-IDF streszczenie
         summary = summarize_tfidf(text)
@@ -354,7 +354,7 @@ def flashcards_from_url(data: URLFlashcardRequest):
         # 3️⃣ Dzielenie na chunk’i
         chunks = split_text(summary)
         if len(chunks) == 0:
-            raise HTTPException(status_code=400, detail="Streszczenie zbyt krótkie")
+            raise HTTPException(status_code=400, detail="Summary too short")
 
         # 4️⃣ Rozdzielenie ilości fiszek
         distribution = distribute_counts_across_chunks(data.count, len(chunks))
@@ -387,7 +387,7 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
     url = data.url
     
     if not url or not url.strip():
-        raise HTTPException(status_code=400, detail="URL YouTube jest pusty.")
+        raise HTTPException(status_code=400, detail="empty URL")
     if data.count <= 0:
         raise HTTPException(status_code=400, detail="count musi być liczbą dodatnią.")
 
@@ -396,7 +396,7 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
     if not video_id:
         raise HTTPException(
             status_code=400, 
-            detail="Niepoprawny link. Nie można wyodrębnić ID filmu z URL."
+            detail="Bad URL"
         )
 
     # 2. Pobranie transkryptu (obsługa błędów YouTube)
@@ -406,22 +406,22 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
     except NoTranscriptFound:
         raise HTTPException(
             status_code=404, 
-            detail="BŁĄD: Nie znaleziono żadnego dostępnego transkryptu (nawet auto-generowanego) dla tego filmu."
+            detail="There is no transcript for this video"
         )
     except TranscriptsDisabled:
         raise HTTPException(
             status_code=403, 
-            detail="BŁĄD: Transkrypcje są wyłączone dla tego wideo."
+            detail="Transcription turned off for this video"
         )
     except YouTubeRequestFailed as e:
         logger.error(f"YouTube API Request Failed: {e}")
         raise HTTPException(
             status_code=503, 
-            detail="BŁĄD: Problem z połączeniem się z YouTube API."
+            detail="API connection problem"
         )
     except Exception as e:
-        logger.exception("Nieznany błąd podczas pobierania transkryptu YouTube")
-        raise HTTPException(status_code=500, detail="Wystąpił nieznany błąd serwera podczas pobierania transkryptu.")
+        logger.exception("Unknown error")
+        raise HTTPException(status_code=500, detail="Unknown error")
     
     # 3. Kontrola długości i streszczanie (logika 1000 słów)
     words = transkrypt.split()
@@ -430,7 +430,7 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
 
     if word_count > YOUTUBE_SUMMARY_THRESHOLD:
         # Używamy istniejącej funkcji TF-IDF (summarize_tfidf).
-        logger.info(f"Transkrypt jest za długi ({word_count} słów). Trwa streszczanie TF-IDF...")
+        logger.info(f"Transkrypt jest za długi ({word_count} słów). Summarizing TF-IDF...")
         content_to_process = summarize_tfidf(transkrypt)
     else:
         logger.info(f"Transkrypt jest krótki ({word_count} słów). Przetwarzanie pełnego tekstu.")
@@ -438,7 +438,7 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
     # 4. Dzielenie na chunk'i (dla Groq API)
     chunks = split_text(content_to_process)
     if len(chunks) == 0:
-        raise HTTPException(status_code=400, detail="Transkrypt jest zbyt krótki lub pusty po przetworzeniu.")
+        raise HTTPException(status_code=400, detail="Short transcript")
 
     # 5. Generowanie fiszek
     distribution = distribute_counts_across_chunks(data.count, len(chunks))
@@ -455,5 +455,6 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
         return {"source_url": url, "source_id": video_id, "flashcards": all_cards}
     
     except Exception as e:
-        logger.exception("Błąd podczas generowania fiszek z transkryptu YouTube")
+        logger.exception("Generating failed")
         raise HTTPException(status_code=500, detail=str(e))
+
