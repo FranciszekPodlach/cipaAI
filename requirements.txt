@@ -6,3 +6,4 @@ python-multipart
 trafilatura
 scikit-learn
 numpy
+youtube-transcript-api
