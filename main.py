@@ -13,7 +13,7 @@ import trafilatura
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 
-# >>> NOWE IMPORTY DLA YOUTUBE: Dodano RequestBlocked
+# >>> NOWE IMPORTY DLA YOUTUBE
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
 from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, YouTubeRequestFailed, RequestBlocked
@@ -43,6 +43,14 @@ client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # ---- App initialization ----
 app = FastAPI(title="Flashcards API")
+
+# **NAPRAWA BŁĘDU TRAFILATURA:** Konfiguracja globalnego User-Agenta na starcie
+# Ten kod ZASTĘPUJE błędne użycie 'user_agent' w fetch_url()
+# Poprawny nagłówek, aby udawać przeglądarkę i uniknąć blokady 403
+user_agent_header = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+trafilatura.settings.set_http_requests('user_agent', user_agent_header)
+logger.info(f"Trafilatura configured with User-Agent: {user_agent_header}")
+
 
 # Enable CORS
 app.add_middleware(
@@ -87,12 +95,10 @@ def extract_text_from_pdf(file: UploadFile) -> str:
             text_parts.append(extracted)
     return "\n\n".join(text_parts)
 
-# ZMODYFIKOWANA FUNKCJA: Dodano User-Agent i angielskie błędy
+# POPRAWIONA FUNKCJA fetch_clean_text (usunięto błędny argument 'user_agent')
 def fetch_clean_text(url: str) -> str:
-    # Adding User-Agent header to pretend to be a browser and prevent 403 block
-    user_agent_header = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    
-    downloaded = trafilatura.fetch_url(url, user_agent=user_agent_header)
+    # Użycie globalnie skonfigurowanego User-Agenta
+    downloaded = trafilatura.fetch_url(url) 
     
     if not downloaded:
         logger.error(f"Failed to fetch URL content for {url} (downloaded is None)")
@@ -352,11 +358,12 @@ def flashcards_from_url(data: URLFlashcardRequest):
         raise HTTPException(status_code=400, detail="Count must be positive")
 
     try:
-        # 1️⃣ Fetch and clean text (with added User-Agent)
+        # 1️⃣ Fetch and clean text (uses globally configured User-Agent)
         text = fetch_clean_text(data.url)
         
-        # Sprawdzanie, czy fetch_clean_text zwróciło pusty tekst po parsowaniu
+        # Checking if fetch_clean_text returned empty text after parsing
         if not text:
+            # This check is defensive as error is typically raised in fetch_clean_text
             raise RuntimeError("Could not extract content from the page or it is empty.") 
 
         # 2️⃣ TF-IDF summarization
@@ -382,7 +389,7 @@ def flashcards_from_url(data: URLFlashcardRequest):
         return {"url": data.url, "flashcards": all_cards}
 
     except RuntimeError as e:
-        # Catching RuntimeError (e.g., 403 Forbidden from trafilatura)
+        # Catching RuntimeErrors (e.g., 403 Forbidden from trafilatura)
         logger.error(f"Runtime error fetching URL content: {e}")
         # Returning 400 Bad Request with a clear message
         raise HTTPException(status_code=400, detail=str(e))
