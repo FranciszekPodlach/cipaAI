@@ -8,6 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
 from pypdf import PdfReader
+import trafilatura
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
 
 # ---- konfiguracja loggera ----
 logging.basicConfig(level=logging.INFO)
@@ -17,9 +21,11 @@ logger = logging.getLogger("flashcards-backend")
 MAX_CHARS_PER_CHUNK = 4000
 MAX_CHUNKS = 10
 MAX_REQUESTED_CARDS = 200
+TFIDF_MAX_SENTENCES = 100
+TFIDF_MAX_WORDS = 15000
+TFIDF_LANGUAGE = "english"
 
 # ---- inicjalizacja aplikacji ----
-# !!! TO JEST TA LINIJKA, KTÓREJ SZUKASZ !!!
 app = FastAPI(title="Flashcards API")
 
 # Zezwól na CORS
@@ -42,6 +48,9 @@ class FlashcardRequest(BaseModel):
     text: str
     count: int = 10
 
+class URLRequest(BaseModel):
+    url: str
+    max_sentences: int = TFIDF_MAX_SENTENCES
 
 # ---- utilsy ----
 def split_text(text: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> List[str]:
@@ -59,7 +68,6 @@ def split_text(text: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> List[str]:
         chunks.append(current.strip())
     return chunks[:MAX_CHUNKS]
 
-
 def extract_text_from_pdf(file: UploadFile) -> str:
     reader = PdfReader(file.file)
     text_parts: List[str] = []
@@ -68,7 +76,6 @@ def extract_text_from_pdf(file: UploadFile) -> str:
         if extracted:
             text_parts.append(extracted)
     return "\n\n".join(text_parts)
-
 
 def call_model_generate(text: str, count: int) -> str:
     """Call Groq model with the REFINED Topic vs Content logic."""
@@ -82,7 +89,7 @@ def call_model_generate(text: str, count: int) -> str:
 Analyze the content inside the <user_input> tags and classify it into one of two modes:
 
 **MODE A: TOPIC EXPANSION** (Triggered when input is short, abstract, or a title, e.g., "Spanish B1", "Photosynthesis", "History of Rome")
-- **Action:** You act as a Subject Matter Expert. You must generating NEW examples, facts, and vocabulary from your internal knowledge base.
+- **Action:** You act as a Subject Matter Expert. You must generate NEW examples, facts, and vocabulary from your internal knowledge base.
 - **Language Topics:** If the topic is a language (e.g., "Spanish Vocabulary"), generate word/phrase pairs.
   - GOOD: Q: "House (in Spanish)" -> A: "Casa"
   - BAD: Q: "What level is this?" -> A: "B1" (NEVER DO THIS)
@@ -133,7 +140,6 @@ Apply the TOPIC vs CONTENT logic strictly.
     
     return response.choices[0].message.content
 
-
 def parse_model_chunk(raw: str) -> List[dict]:
     try:
         parsed = json.loads(raw)
@@ -151,7 +157,6 @@ def parse_model_chunk(raw: str) -> List[dict]:
         pass
     return []
 
-
 def distribute_counts_across_chunks(total_count: int, chunks_count: int) -> List[int]:
     if chunks_count <= 0: return []
     base = total_count // chunks_count
@@ -167,12 +172,49 @@ def distribute_counts_across_chunks(total_count: int, chunks_count: int) -> List
                 distribution[i] -= 1
     return [d for d in distribution if d > 0]
 
+# ---- TF-IDF utilities ----
+def fetch_clean_text(url: str) -> str:
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        raise HTTPException(status_code=400, detail="Nie udało się pobrać strony")
+
+    text = trafilatura.extract(
+        downloaded,
+        include_comments=False,
+        include_tables=False,
+        include_formatting=False
+    )
+    if not text:
+        raise HTTPException(status_code=400, detail="Nie udało się wyodrębnić treści")
+
+    text = re.sub(r'\[[^\]]*\]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    words = text.split()
+    if len(words) > TFIDF_MAX_WORDS:
+        text = " ".join(words[:TFIDF_MAX_WORDS])
+    return text
+
+def split_into_sentences(text: str):
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return [s.strip() for s in sentences if len(s.split()) > 5]
+
+def summarize_tfidf(text: str, max_sentences: int) -> str:
+    sentences = split_into_sentences(text)
+    if len(sentences) <= max_sentences:
+        return " ".join(sentences)
+
+    vectorizer = TfidfVectorizer(stop_words=TFIDF_LANGUAGE, ngram_range=(1,2))
+    tfidf = vectorizer.fit_transform(sentences)
+    sentence_scores = np.asarray(tfidf.sum(axis=1)).ravel()
+    top_indices = np.argsort(sentence_scores)[-max_sentences:]
+    top_indices = sorted(top_indices)
+    summary = " ".join(sentences[i] for i in top_indices)
+    return summary
 
 # ---- routes ----
 @app.get("/")
 def root():
     return {"status": "ok"}
-
 
 @app.post("/flashcards")
 def flashcards_from_text(data: FlashcardRequest):
@@ -200,7 +242,6 @@ def flashcards_from_text(data: FlashcardRequest):
     except Exception as e:
         logger.exception("Error generating flashcards from text")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/flashcards/pdf")
 async def flashcards_from_pdf(file: UploadFile = File(...), count: int = Form(10)):
@@ -230,3 +271,17 @@ async def flashcards_from_pdf(file: UploadFile = File(...), count: int = Form(10
     except Exception as e:
         logger.exception("Error generating flashcards from pdf")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ---- NOWY ENDPOINT TF-IDF ----
+@app.post("/summarize/url")
+def summarize_url(data: URLRequest):
+    if not data.url.strip():
+        raise HTTPException(status_code=400, detail="URL is empty")
+
+    text = fetch_clean_text(data.url)
+    summary = summarize_tfidf(text, data.max_sentences)
+    return {
+        "url": data.url,
+        "summary": summary,
+        "words": len(summary.split())
+    }
