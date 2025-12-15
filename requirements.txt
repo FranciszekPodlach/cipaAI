@@ -3,3 +3,6 @@ uvicorn
 groq
 pypdf
 python-multipart
+trafilatura
+scikit-learn
+numpy
