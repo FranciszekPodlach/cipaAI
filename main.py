@@ -13,6 +13,13 @@ import trafilatura
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 
+# >>> NOWE IMPORTY DLA YOUTUBE
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, YouTubeRequestFailed
+from urllib.parse import urlparse, parse_qs
+# <<<
+
 # ---- konfiguracja loggera ----
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("flashcards-backend")
@@ -25,7 +32,14 @@ MAX_REQUESTED_CARDS = 200
 # TF-IDF ustawienia
 MAX_SENTENCES = 100
 MAX_WORDS = 15000
-LANGUAGE = "english"
+LANGUAGE = "english" # Język do usuwania stop words (TF-IDF)
+YOUTUBE_SUMMARY_THRESHOLD = 1000 # Próg słów do streszczania transkryptu
+
+# ---- init klienta Groq ----
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    logger.warning("GROQ_API_KEY not set in environment — requests to AI will fail.")
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # ---- inicjalizacja aplikacji ----
 app = FastAPI(title="Flashcards API")
@@ -38,12 +52,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ---- init klienta Groq ----
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    logger.warning("GROQ_API_KEY not set in environment — requests to AI will fail.")
-client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # ---- modele ----
 class FlashcardRequest(BaseModel):
@@ -82,7 +90,7 @@ def extract_text_from_pdf(file: UploadFile) -> str:
 def fetch_clean_text(url: str) -> str:
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
-        raise RuntimeError("Nie udało się pobrać strony")
+        raise RuntimeError("Cannot get the URL")
     text = trafilatura.extract(
         downloaded,
         include_comments=False,
@@ -90,7 +98,7 @@ def fetch_clean_text(url: str) -> str:
         include_formatting=False
     )
     if not text:
-        raise RuntimeError("Nie udało się wyodrębnić treści")
+        raise RuntimeError("Cannot fetch the Text from URL")
 
     text = re.sub(r'\[[^\]]*\]', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
@@ -119,6 +127,77 @@ def summarize_tfidf(text: str, max_sentences: int = MAX_SENTENCES) -> str:
     top_indices = sorted(top_indices)
     summary = " ".join(sentences[i] for i in top_indices)
     return summary
+
+
+# >>> NOWE FUNKCJE I ZOPTYMALIZOWANA LISTA PRIORYTETÓW DLA YOUTUBE <<<
+
+# PEŁNA LISTA KODÓW JĘZYKOWYCH (Priorytet: EN > PL > Najczęściej używane globalnie)
+WSZYSTKIE_KODY_PRIORYTET = [
+    # Priorytety użytkownika
+    'en',  # Angielski (Globalny priorytet)
+
+    # Najczęściej używane języki globalne i na YouTube (optymalizacja wydajności)
+    'es',  # Hiszpański
+    'pt',  # Portugalski
+    'ru',  # Rosyjski
+    'zh',  # Chiński (uproszczony i tradycyjny)
+    'de',  # Niemiecki
+    'fr',  # Francuski
+    'ja',  # Japoński
+    'ko',  # Koreański
+    'it',  # Włoski
+    'hi',  # Hindi
+    'id',  # Indonezyjski
+    'tr',  # Turecki
+    'ar',  # Arabski
+    'th',  # Tajski
+    'vi',  # Wietnamski
+    'nl',  # Holenderski
+    'sv',  # Szwedzki
+    'pl',
+
+    # Pozostałe języki (dla maksymalnego pokrycia, sortowane alfabetycznie kodów)
+    'af', 'sq', 'am', 'as', 'ay', 'az', 'eu', 'bn', 'bs', 'bg', 'my', 
+    'ca', 'ceb', 'hr', 'cs', 'da', 'et', 'fil', 'fi', 'gl', 'ka', 'el', 
+    'gu', 'ha', 'iw', 'hu', 'is', 'ig', 'ga', 'jv', 'kn', 'kk', 'km', 
+    'ky', 'lo', 'lv', 'lt', 'mk', 'mg', 'ms', 'ml', 'mr', 'mn', 'ne', 
+    'no', 'or', 'om', 'ps', 'fa', 'pa', 'ro', 'sm', 'sa', 'sr', 'sn', 
+    'sd', 'si', 'sk', 'sl', 'so', 'su', 'sw', 'tl', 'ta', 'te', 'ti', 
+    'uk', 'ur', 'uz', 'cy', 'xh', 'yi', 'yo', 'zu'
+]
+
+def wyodrebnij_video_id(url: str) -> str or None:
+    """
+    Wyodrębnia ID filmu z różnych formatów linków YouTube (watch, youtu.be, playlisty).
+    """
+    query = urlparse(url)
+    if query.hostname in ('www.youtube.com', 'youtube.com', 'm.youtube.com'):
+        if query.path == '/watch':
+            return parse_qs(query.query).get('v', [None])[0]
+        if query.path.startswith('/embed/'):
+            return query.path.split('/')[2]
+    if query.hostname in ('youtu.be', 'www.youtu.be'):
+        return query.path[1:]
+    match = re.search(r'(?:v=|/v/|embed/|youtu\.be/)([a-zA-Z0-9_-]{11})', url)
+    if match:
+        return match.group(1)
+    return None
+
+def pobierz_transkrypt_w_pierwszym_jezyku(video_id: str) -> str:
+    """
+    Pobiera transkrypt w pierwszym znalezionym języku z listy priorytetowej
+    używając dozwolonej metody fetch() i TextFormatter.
+    """
+    ytt_api = YouTubeTranscriptApi()
+    formatter = TextFormatter()
+    
+    # API znajdzie PIERWSZY dostępny język z listy 'WSZYSTKIE_KODY_PRIORYTET'
+    fetched_dane = ytt_api.fetch(video_id, languages=WSZYSTKIE_KODY_PRIORYTET)
+    
+    # Formatowanie za pomocą TextFormatter
+    return formatter.format_transcript(fetched_dane)
+
+# <<<
 
 def call_model_generate(text: str, count: int) -> str:
     if not client:
@@ -194,6 +273,7 @@ def distribute_counts_across_chunks(total_count: int, chunks_count: int) -> List
                 distribution[i] -= 1
     return [d for d in distribution if d > 0]
 
+
 # ---- routes ----
 @app.get("/")
 def root():
@@ -255,7 +335,6 @@ async def flashcards_from_pdf(file: UploadFile = File(...), count: int = Form(10
         logger.exception("Error generating flashcards from pdf")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ---- NOWY ENDPOINT DLA URL ----
 @app.post("/flashcards/url")
 def flashcards_from_url(data: URLFlashcardRequest):
     if not data.url or not data.url.strip():
@@ -293,4 +372,88 @@ def flashcards_from_url(data: URLFlashcardRequest):
 
     except Exception as e:
         logger.exception("Error generating flashcards from URL")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==============================================================================
+#                 ENDPOINT DLA YOUTUBE
+# ==============================================================================
+
+@app.post("/flashcards/youtube")
+def flashcards_from_youtube(data: URLFlashcardRequest):
+    """
+    Generuje fiszki na podstawie transkryptu filmu YouTube. 
+    Streszcza transkrypt, jeśli przekracza 1000 słów.
+    """
+    url = data.url
+    
+    if not url or not url.strip():
+        raise HTTPException(status_code=400, detail="URL YouTube jest pusty.")
+    if data.count <= 0:
+        raise HTTPException(status_code=400, detail="count musi być liczbą dodatnią.")
+
+    # 1. Wyodrębnienie ID Wideo
+    video_id = wyodrebnij_video_id(url)
+    if not video_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="Niepoprawny link. Nie można wyodrębnić ID filmu z URL."
+        )
+
+    # 2. Pobranie transkryptu (obsługa błędów YouTube)
+    try:
+        transkrypt = pobierz_transkrypt_w_pierwszym_jezyku(video_id)
+        
+    except NoTranscriptFound:
+        raise HTTPException(
+            status_code=404, 
+            detail="BŁĄD: Nie znaleziono żadnego dostępnego transkryptu (nawet auto-generowanego) dla tego filmu."
+        )
+    except TranscriptsDisabled:
+        raise HTTPException(
+            status_code=403, 
+            detail="BŁĄD: Transkrypcje są wyłączone dla tego wideo."
+        )
+    except YouTubeRequestFailed as e:
+        logger.error(f"YouTube API Request Failed: {e}")
+        raise HTTPException(
+            status_code=503, 
+            detail="BŁĄD: Problem z połączeniem się z YouTube API."
+        )
+    except Exception as e:
+        logger.exception("Nieznany błąd podczas pobierania transkryptu YouTube")
+        raise HTTPException(status_code=500, detail="Wystąpił nieznany błąd serwera podczas pobierania transkryptu.")
+    
+    # 3. Kontrola długości i streszczanie (logika 1000 słów)
+    words = transkrypt.split()
+    word_count = len(words)
+    content_to_process = transkrypt
+
+    if word_count > YOUTUBE_SUMMARY_THRESHOLD:
+        # Używamy istniejącej funkcji TF-IDF (summarize_tfidf).
+        logger.info(f"Transkrypt jest za długi ({word_count} słów). Trwa streszczanie TF-IDF...")
+        content_to_process = summarize_tfidf(transkrypt)
+    else:
+        logger.info(f"Transkrypt jest krótki ({word_count} słów). Przetwarzanie pełnego tekstu.")
+
+    # 4. Dzielenie na chunk'i (dla Groq API)
+    chunks = split_text(content_to_process)
+    if len(chunks) == 0:
+        raise HTTPException(status_code=400, detail="Transkrypt jest zbyt krótki lub pusty po przetworzeniu.")
+
+    # 5. Generowanie fiszek
+    distribution = distribute_counts_across_chunks(data.count, len(chunks))
+    all_cards: List[dict] = []
+
+    try:
+        for chunk, per_count in zip(chunks, distribution):
+            raw = call_model_generate(chunk, per_count)
+            parsed = parse_model_chunk(raw)
+            if len(parsed) > per_count:
+                parsed = parsed[:per_count]
+            all_cards.extend(parsed)
+
+        return {"source_url": url, "source_id": video_id, "flashcards": all_cards}
+    
+    except Exception as e:
+        logger.exception("Błąd podczas generowania fiszek z transkryptu YouTube")
         raise HTTPException(status_code=500, detail=str(e))
