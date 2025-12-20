@@ -15,7 +15,14 @@ import numpy as np
 from urllib.parse import urlparse, parse_qs
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
-from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, YouTubeRequestFailed
+
+# Obsługa błędów YouTube (kompatybilność wersji)
+try:
+    from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, YouTubeRequestFailed
+except ImportError:
+    NoTranscriptFound = Exception
+    TranscriptsDisabled = Exception
+    YouTubeRequestFailed = Exception
 
 # ---- konfiguracja loggera ----
 logging.basicConfig(level=logging.INFO)
@@ -24,19 +31,19 @@ logger = logging.getLogger("flashcards-backend")
 # ---- ustawienia ----
 MAX_CHARS_PER_CHUNK = 4000
 MAX_CHUNKS = 10
+
 MAX_REQUESTED_CARDS = 200
 
 # TF-IDF ustawienia
 MAX_SENTENCES = 100
-MAX_WORDS = 15000  # Maksymalna ilość słów wejściowych przed streszczeniem
-LANGUAGE = "english" 
-YOUTUBE_SUMMARY_THRESHOLD = 1000 # Próg słów do streszczania transkryptu
+MAX_WORDS = 15000  
+YOUTUBE_SUMMARY_THRESHOLD = 1000 
 
 # ---- init klienta Groq ----
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-app = FastAPI(title="Flashcards API")
+app = FastAPI(title="Ironclad Flashcards API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -78,11 +85,8 @@ def extract_text_from_pdf(file: UploadFile) -> str:
         extracted = page.extract_text()
         if extracted:
             text_parts.append(extracted)
-    
     full_text = "\n\n".join(text_parts)
-    # Czyszczenie nadmiarowych białych znaków (podobnie jak w URL)
-    full_text = re.sub(r'\s+', ' ', full_text).strip()
-    return full_text
+    return full_text.strip()
 
 def fetch_clean_text(url: str) -> str:
     downloaded = trafilatura.fetch_url(url)
@@ -96,36 +100,34 @@ def fetch_clean_text(url: str) -> str:
     )
     if not text:
         raise RuntimeError("Cannot fetch the Text from URL")
-
     text = re.sub(r'\[[^\]]*\]', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 def split_into_sentences(text: str):
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    return [s.strip() for s in sentences if len(s.split()) > 5]
+    return [s.strip() for s in sentences if len(s.split()) > 3]
 
 def summarize_tfidf(text: str, max_sentences: int = MAX_SENTENCES) -> str:
-    """Streszcza tekst używając TF-IDF do wybrania najważniejszych zdań."""
     sentences = split_into_sentences(text)
     if len(sentences) <= max_sentences:
         return " ".join(sentences)
 
-    vectorizer = TfidfVectorizer(stop_words=LANGUAGE, ngram_range=(1, 2))
+    # WAŻNE: stop_words=None, żeby działało dla każdego języka (PL, FR, DE, EN itd.)
+    vectorizer = TfidfVectorizer(stop_words=None, ngram_range=(1, 2))
     try:
         tfidf = vectorizer.fit_transform(sentences)
         sentence_scores = np.asarray(tfidf.sum(axis=1)).ravel()
         top_indices = np.argsort(sentence_scores)[-max_sentences:]
         top_indices = sorted(top_indices)
-        summary = " ".join(sentences[i] for i in top_indices)
-        return summary
+        return " ".join(sentences[i] for i in top_indices)
     except Exception as e:
         logger.error(f"Summarization failed: {e}")
-        # W razie błędu vectorizera (np. same stop-words), zwróć ucięty początek
         return " ".join(sentences[:max_sentences])
 
 # ---- YOUTUBE PRIORITY LIST ----
-WSZYSTKIE_KODY_PRIORYTET = ['en', 'es', 'pt', 'ru', 'zh', 'de', 'fr', 'ja', 'ko', 'it', 'pl']
+# Lista priorytetów pobierania napisów
+WSZYSTKIE_KODY_PRIORYTET = ['pl', 'en', 'es', 'de', 'fr', 'it', 'pt', 'ru', 'ja', 'zh', 'ko']
 
 def wyodrebnij_video_id(url: str) -> str or None:
     query = urlparse(url)
@@ -144,13 +146,52 @@ def pobierz_transkrypt_w_pierwszym_jezyku(video_id: str) -> str:
 
 def call_model_generate(text: str, count: int) -> str:
     if not client: raise RuntimeError("Groq client not configured.")
-    system_prompt = """You are an expert educational AI designed to create high-retention Anki-style flashcards. Return strictly a JSON object with a "flashcards" array containing "question" and "answer" fields."""
-    user_prompt = f"Generate exactly {count} flashcards based on the text below.\n<user_input>\n{text}\n</user_input>"
+    
+    # =========================================================================
+    # ŻELAZNY SYSTEM PROMPT - NIE DO ZMORDOWANIA
+    # =========================================================================
+    system_prompt = """
+    You are a Strict Flashcard Compiler Engine. Your ONLY purpose is to convert raw text into structured JSON flashcards using "Mirror Language Logic".
+
+    ### CORE RULES (NON-NEGOTIABLE):
+    1. **AUTO-LANGUAGE ALIGNMENT**:
+       - You must detect the primary language of the provided text chunk.
+       - **Output Language Rule**: The flashcards (Question and Answer) MUST be in the **SAME LANGUAGE** as the source text.
+       - *Exception*: If the text is explicitly a dictionary/translation list (e.g., "Pies - Dog"), maintain the translation pair structure.
+    
+    2. **STRICT FORMATTING**:
+       - Output strictly valid JSON.
+       - Structure: `{"flashcards": [{"question": "...", "answer": "..."}, ...]}`
+       - NO chat, NO explanations, NO markdown formatting (like ```json), just the raw JSON string.
+
+    3. **CONTENT LOGIC**:
+       - **For Informational Text (Articles, Transcripts):** Create concept-checking questions.
+         - *Bad*: "What is this text about?" (Too vague)
+         - *Good*: "W którym roku wybuchło Powstanie Warszawskie?" (Specific, assumes Polish text)
+       - **For Educational/Code Text:** Focus on specific definitions or syntax.
+       - **For Mixed/Messy Text:** Extract the most valuable facts.
+
+    4. **QUALITY CONTROL**:
+       - Questions must be short and atomic (test one fact at a time).
+       - Answers must be concise.
+       - Do not hallucinate information not present in the text.
+    """
+
+    user_prompt = f"""
+    TARGET: Generate exactly {count} flashcards from the text below.
+    
+    <source_text>
+    {text}
+    </source_text>
+    """
     
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        temperature=0.6,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.4, # Niski, żeby nie gwiazdorzył
         response_format={"type": "json_object"}
     )
     return response.choices[0].message.content
@@ -159,7 +200,12 @@ def parse_model_chunk(raw: str) -> List[dict]:
     try:
         parsed = json.loads(raw)
         return parsed.get("flashcards", [])
-    except: return []
+    except json.JSONDecodeError:
+        logger.error(f"JSON Decode Error. Raw: {raw[:50]}")
+        return []
+    except Exception as e:
+        logger.error(f"General Parse Error: {e}")
+        return []
 
 def distribute_counts_across_chunks(total_count: int, chunks_count: int) -> List[int]:
     if chunks_count <= 0: return []
@@ -171,9 +217,8 @@ def distribute_counts_across_chunks(total_count: int, chunks_count: int) -> List
 
 @app.post("/flashcards")
 def flashcards_from_text(data: FlashcardRequest):
-    if not data.text.strip(): raise HTTPException(status_code=400, detail="text is empty")
+    if not data.text.strip(): raise HTTPException(status_code=400, detail="Text is empty")
     
-    # Dla czystego tekstu też dodajemy opcję streszczenia, jeśli wklejono gigantyczny tekst
     processed_text = data.text
     if len(processed_text.split()) > MAX_WORDS:
         processed_text = summarize_tfidf(processed_text)
@@ -184,46 +229,43 @@ def flashcards_from_text(data: FlashcardRequest):
 
     try:
         for chunk, per_count in zip(chunks, distribution):
+            if per_count == 0: continue
             raw = call_model_generate(chunk, per_count)
             all_cards.extend(parse_model_chunk(raw)[:per_count])
         return {"flashcards": all_cards}
     except Exception as e:
+        logger.exception("Text processing error")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/flashcards/pdf")
 async def flashcards_from_pdf(file: UploadFile = File(...), count: int = Form(10)):
     try:
-        # 1️⃣ Wyciągnięcie całego tekstu z PDF
         text = extract_text_from_pdf(file)
         if not text: raise HTTPException(status_code=400, detail="PDF is empty")
 
-        # 2️⃣ LOGIKA STRESZCZANIA (Taka sama jak w URL)
-        # Sprawdzamy czy tekst przekracza limit słów
         processed_content = text
         if len(text.split()) > MAX_WORDS:
             logger.info("PDF too long. Summarizing...")
             processed_content = summarize_tfidf(text)
 
-        # 3️⃣ Dzielenie na chunki i wysyłka do AI
         chunks = split_text(processed_content)
         distribution = distribute_counts_across_chunks(count, len(chunks))
         all_cards = []
 
         for chunk, per_count in zip(chunks, distribution):
+            if per_count == 0: continue
             raw = call_model_generate(chunk, per_count)
             all_cards.extend(parse_model_chunk(raw)[:per_count])
 
         return {"flashcards": all_cards}
     except Exception as e:
-        logger.exception("PDF processing failed")
+        logger.exception("PDF processing error")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/flashcards/url")
 def flashcards_from_url(data: URLFlashcardRequest):
     try:
         text = fetch_clean_text(data.url)
-        
-        # LOGIKA STRESZCZANIA
         processed_content = text
         if len(text.split()) > MAX_WORDS:
             processed_content = summarize_tfidf(text)
@@ -233,22 +275,22 @@ def flashcards_from_url(data: URLFlashcardRequest):
         all_cards = []
 
         for chunk, per_count in zip(chunks, distribution):
+            if per_count == 0: continue
             raw = call_model_generate(chunk, per_count)
             all_cards.extend(parse_model_chunk(raw)[:per_count])
 
         return {"url": data.url, "flashcards": all_cards}
     except Exception as e:
+        logger.exception("URL processing error")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/flashcards/youtube")
 def flashcards_from_youtube(data: URLFlashcardRequest):
     video_id = wyodrebnij_video_id(data.url)
-    if not video_id: raise HTTPException(status_code=400, detail="Bad URL")
+    if not video_id: raise HTTPException(status_code=400, detail="Invalid YouTube URL")
 
     try:
         transkrypt = pobierz_transkrypt_w_pierwszym_jezyku(video_id)
-        
-        # LOGIKA STRESZCZANIA
         processed_content = transkrypt
         if len(transkrypt.split()) > YOUTUBE_SUMMARY_THRESHOLD:
             processed_content = summarize_tfidf(transkrypt)
@@ -258,9 +300,15 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
         all_cards = []
 
         for chunk, per_count in zip(chunks, distribution):
+            if per_count == 0: continue
             raw = call_model_generate(chunk, per_count)
             all_cards.extend(parse_model_chunk(raw)[:per_count])
 
         return {"source_url": data.url, "flashcards": all_cards}
     except Exception as e:
+        logger.exception("YouTube processing error")
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
