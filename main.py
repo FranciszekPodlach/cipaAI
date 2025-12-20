@@ -150,62 +150,53 @@ def call_model_generate(text: str, count: int) -> str:
     # =========================================================================
     # ŻELAZNY SYSTEM PROMPT - NIE DO ZMORDOWANIA
     # =========================================================================
-    system_prompt = """
-    You are a Data Extraction Robot. You are NOT a conversational assistant. 
-    Your ONLY job is to extract specific FACTS/TRANSLATIONS from the text and convert them into JSON flashcards.
+    system_prompt = """You are an expert educational AI designed to create high-retention Anki-style flashcards.
 
-    ### CRITICAL RULES (VIOLATION = FAILURE):
-    1. **NO META-QUESTIONS**: 
-       - NEVER ask "Why is this topic important?".
-       - NEVER ask "What is the summary of this text?".
-       - NEVER ask "Why should we learn languages?".
-       - ONLY ask about specific facts found explicitly in the text.
+### CORE LOGIC (TOPIC vs. CONTENT):
+Analyze the content inside the <user_input> tags and classify it into one of two modes:
 
-    2. **STRICT CONTEXT ADHERENCE**:
-       - If the text is a list of words (e.g., "Dog - Pies"), create simple translation pairs.
-       - If the text is an article about Geography, ask about specific locations/places mentioned, NOT about "the beauty of travel".
-       - If the text contains specific sentences, use them directly.
+**MODE A: TOPIC EXPANSION** (Triggered when input is short, abstract, or a title, e.g., "Spanish B1", "Photosynthesis", "History of Rome")
+- **Action:** You act as a Subject Matter Expert. You must generating NEW examples, facts, and vocabulary from your internal knowledge base.
+- **Language Topics:** If the topic is a language (e.g., "Spanish Vocabulary"), generate word/phrase pairs.
+  - GOOD: Q: "House (in Spanish)" -> A: "Casa"
+  - BAD: Q: "What level is this?" -> A: "B1" (NEVER DO THIS)
 
-    3. **LANGUAGE MIRRORING**:
-       - Question and Answer must match the language of the source text facts.
-       - If source is Polish -> Output Polish.
-       - If source is Mixed (PL-EN) -> Output Mixed pairs.
+**MODE B: CONTENT EXTRACTION** (Triggered when input is long, detailed text, notes, or articles)
+- **Action:** You act as an Analyst. You must extract facts ONLY from the provided text.
+- Do not hallucinate outside info.
 
-    ### EXAMPLES OF BEHAVIOR:
-    
-    [BAD - DO NOT DO THIS]
-    Input: "Stolice Europy: Paryż to stolica Francji, a Rzym Włoch."
-    Output: {"question": "Dlaczego warto znać stolice?", "answer": "Bo to rozwija wiedzę."} -> WRONG!
-    
-    [GOOD - DO THIS]
-    Input: "Stolice Europy: Paryż to stolica Francji, a Rzym Włoch."
-    Output: 
+### LANGUAGE RULES:
+1. **Target Language:** The flashcards must be in the language of the INPUT text.
+   - Exception: For Language Learning topics, use Bilingual format (Native -> Target).
+
+### BAN LIST (NEVER DO THIS):
+- Do NOT ask questions about the text itself (e.g., "What does the text say about X?").
+- Do NOT ask about metadata (e.g., "Who is the author?").
+- Do NOT create "orphan" questions like "He went there." (Who is he?).
+
+### JSON OUTPUT FORMAT:
+Return strictly a JSON object with a "flashcards" array.
+{
+  "flashcards": [
     {
-      "flashcards": [
-        {"question": "Stolica Francji", "answer": "Paryż"},
-        {"question": "Stolica Włoch", "answer": "Rzym"}
-      ]
+      "question": "Clear, specific question",
+      "answer": "Concise answer"
     }
+  ]
+}
+"""
 
-    [GOOD - DO THIS]
-    Input: "I like dogs - Lubię psy. She goes home - Ona idzie do domu."
-    Output:
-    {
-      "flashcards": [
-        {"question": "I like dogs", "answer": "Lubię psy"},
-        {"question": "She goes home", "answer": "Ona idzie do domu"}
-      ]
-    }
-    """
+Detect the language of the text and produce the flashcards in the same language.
+    # --- BEZPIECZNE FORMATOWANIE INPUTU ---
+    # Używamy XML tags, żeby Llama wiedziała dokładnie, gdzie zaczyna się i kończy tekst użytkownika.
+    user_prompt = f"""Generate exactly {count} flashcards based on the text below.
+Apply the TOPIC vs CONTENT logic strictly.
 
-    user_prompt = f"""
-    EXTRACT exactly {count} flashcards from the RAW DATA below.
-    Do not summarize. Do not philosophize. Just extract facts/pairs.
-    
-    <RAW_DATA>
-    {text}
-    </RAW_DATA>
-    """
+Text:
+<user_input>
+{text}
+</user_input>
+"""
     
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -334,4 +325,5 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
