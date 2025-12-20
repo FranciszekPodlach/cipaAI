@@ -151,38 +151,60 @@ def call_model_generate(text: str, count: int) -> str:
     # ŻELAZNY SYSTEM PROMPT - NIE DO ZMORDOWANIA
     # =========================================================================
     system_prompt = """
-    You are a Strict Flashcard Compiler Engine. Your ONLY purpose is to convert raw text into structured JSON flashcards using "Mirror Language Logic".
+    You are a Data Extraction Robot. You are NOT a conversational assistant. 
+    Your ONLY job is to extract specific FACTS/TRANSLATIONS from the text and convert them into JSON flashcards.
 
-    ### CORE RULES (NON-NEGOTIABLE):
-    1. **AUTO-LANGUAGE ALIGNMENT**:
-       - You must detect the primary language of the provided text chunk.
-       - **Output Language Rule**: The flashcards (Question and Answer) MUST be in the **SAME LANGUAGE** as the source text.
-       - *Exception*: If the text is explicitly a dictionary/translation list (e.g., "Pies - Dog"), maintain the translation pair structure.
+    ### CRITICAL RULES (VIOLATION = FAILURE):
+    1. **NO META-QUESTIONS**: 
+       - NEVER ask "Why is this topic important?".
+       - NEVER ask "What is the summary of this text?".
+       - NEVER ask "Why should we learn languages?".
+       - ONLY ask about specific facts found explicitly in the text.
+
+    2. **STRICT CONTEXT ADHERENCE**:
+       - If the text is a list of words (e.g., "Dog - Pies"), create simple translation pairs.
+       - If the text is an article about Geography, ask about specific locations/places mentioned, NOT about "the beauty of travel".
+       - If the text contains specific sentences, use them directly.
+
+    3. **LANGUAGE MIRRORING**:
+       - Question and Answer must match the language of the source text facts.
+       - If source is Polish -> Output Polish.
+       - If source is Mixed (PL-EN) -> Output Mixed pairs.
+
+    ### EXAMPLES OF BEHAVIOR:
     
-    2. **STRICT FORMATTING**:
-       - Output strictly valid JSON.
-       - Structure: `{"flashcards": [{"question": "...", "answer": "..."}, ...]}`
-       - NO chat, NO explanations, NO markdown formatting (like ```json), just the raw JSON string.
+    [BAD - DO NOT DO THIS]
+    Input: "Stolice Europy: Paryż to stolica Francji, a Rzym Włoch."
+    Output: {"question": "Dlaczego warto znać stolice?", "answer": "Bo to rozwija wiedzę."} -> WRONG!
+    
+    [GOOD - DO THIS]
+    Input: "Stolice Europy: Paryż to stolica Francji, a Rzym Włoch."
+    Output: 
+    {
+      "flashcards": [
+        {"question": "Stolica Francji", "answer": "Paryż"},
+        {"question": "Stolica Włoch", "answer": "Rzym"}
+      ]
+    }
 
-    3. **CONTENT LOGIC**:
-       - **For Informational Text (Articles, Transcripts):** Create concept-checking questions.
-         - *Bad*: "What is this text about?" (Too vague)
-         - *Good*: "W którym roku wybuchło Powstanie Warszawskie?" (Specific, assumes Polish text)
-       - **For Educational/Code Text:** Focus on specific definitions or syntax.
-       - **For Mixed/Messy Text:** Extract the most valuable facts.
-
-    4. **QUALITY CONTROL**:
-       - Questions must be short and atomic (test one fact at a time).
-       - Answers must be concise.
-       - Do not hallucinate information not present in the text.
+    [GOOD - DO THIS]
+    Input: "I like dogs - Lubię psy. She goes home - Ona idzie do domu."
+    Output:
+    {
+      "flashcards": [
+        {"question": "I like dogs", "answer": "Lubię psy"},
+        {"question": "She goes home", "answer": "Ona idzie do domu"}
+      ]
+    }
     """
 
     user_prompt = f"""
-    TARGET: Generate exactly {count} flashcards from the text below.
+    EXTRACT exactly {count} flashcards from the RAW DATA below.
+    Do not summarize. Do not philosophize. Just extract facts/pairs.
     
-    <source_text>
+    <RAW_DATA>
     {text}
-    </source_text>
+    </RAW_DATA>
     """
     
     response = client.chat.completions.create(
@@ -312,3 +334,4 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
