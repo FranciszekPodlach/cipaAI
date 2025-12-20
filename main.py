@@ -31,7 +31,6 @@ logger = logging.getLogger("flashcards-backend")
 # ---- ustawienia ----
 MAX_CHARS_PER_CHUNK = 4000
 MAX_CHUNKS = 10
-
 MAX_REQUESTED_CARDS = 200
 
 # TF-IDF ustawienia
@@ -148,7 +147,7 @@ def call_model_generate(text: str, count: int) -> str:
     if not client: raise RuntimeError("Groq client not configured.")
     
     # =========================================================================
-    # ŻELAZNY SYSTEM PROMPT - NIE DO ZMORDOWANIA
+    # ŻELAZNY SYSTEM PROMPT - POPRAWIONY (BEZ SYNTAX ERROR)
     # =========================================================================
     system_prompt = """You are an expert educational AI designed to create high-retention Anki-style flashcards.
 
@@ -184,9 +183,10 @@ Return strictly a JSON object with a "flashcards" array.
     }
   ]
 }
-"""
 
 Detect the language of the text and produce the flashcards in the same language.
+"""
+
     # --- BEZPIECZNE FORMATOWANIE INPUTU ---
     # Używamy XML tags, żeby Llama wiedziała dokładnie, gdzie zaczyna się i kończy tekst użytkownika.
     user_prompt = f"""Generate exactly {count} flashcards based on the text below.
@@ -325,5 +325,3 @@ def flashcards_from_youtube(data: URLFlashcardRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
